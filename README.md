@@ -4,6 +4,8 @@
 
 **在线体验**：<https://wangxp7.github.io/YiQiVibe-WBGL2-GLSL-ocean-ZG5.3F/>
 
+📖 技术原理详解：[WebGL2-原生GLSL技术详解.md](./WebGL2-原生GLSL技术详解.md)（渲染管线、FBM、光线步进、性能模型）
+
 ## 运行
 
 双击 `index.html` 即可（需支持 WebGL2 的现代浏览器），或访问上面的 GitHub Pages 站点。
