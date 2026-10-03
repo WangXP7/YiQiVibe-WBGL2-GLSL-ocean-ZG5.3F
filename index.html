@@ -49,6 +49,7 @@
 <div id="panel">
   <div class="row"><label>分辨率</label><input id="res" type="range" min="30" max="100" step="5" value="75"><output id="resVal" class="res"></output></div>
   <div class="row check"><input id="auto" type="checkbox" checked><label for="auto">自动适配</label></div>
+  <div class="row"><label>GPU上限</label><input id="gpu" type="range" min="40" max="100" step="5" value="80"><output id="gpuVal"></output></div>
   <div class="row"><label>极光强度</label><input id="aur" type="range" min="0" max="3" step="0.01" value="1.70"><output id="aurVal"></output></div>
   <div class="row"><label>海浪高度</label><input id="wav" type="range" min="0" max="3" step="0.01" value="1.60"><output id="wavVal"></output></div>
   <div class="row"><label>时间速度</label><input id="spd" type="range" min="0" max="4" step="0.05" value="1.00"><output id="spdVal"></output></div>
@@ -260,7 +261,34 @@ gl.bindVertexArray(gl.createVertexArray());
 const U = {};
 for (const n of ['uRes', 'uT', 'uAurora', 'uWave', 'uLook']) U[n] = gl.getUniformLocation(prog, n);
 
-const P = { scale: 0.75, aurora: 1.70, wave: 1.60, speed: 1.00, yaw: 0, pitch: -0.12 };
+// GPU 占用估算（浏览器拿不到真实占用率，此值为估算）：
+// 1) 支持 GPU 定时器查询且数值合理 → 用真实 GPU 执行毫秒
+// 2) 否则用帧间隔推断：帧间隔超过 18ms 说明 GPU 是瓶颈（间隔≈GPU 耗时）；
+//    锁在满帧率说明有余量，按 55% 基准估算
+const gpuTimerExt = (() => { try { return gl.getExtension('EXT_disjoint_timer_query_webgl2'); } catch (e) { return null; } })();
+const pendingQ = [];
+function gpuPoll() {
+  if (!gpuTimerExt) return;
+  let disjoint = false;
+  try { disjoint = gpuTimerExt.getParameter(gpuTimerExt.GPU_DISJOINT_EXT); } catch (e) { return; }
+  while (pendingQ.length) {
+    const q = pendingQ[0];
+    let avail = false;
+    try { avail = gpuTimerExt.getQueryParameter(q, gpuTimerExt.QUERY_RESULT_AVAILABLE); } catch (e) { break; }
+    if (!avail) break;
+    pendingQ.shift();
+    if (!disjoint) {
+      const ns = gpuTimerExt.getQueryParameter(q, gpuTimerExt.QUERY_RESULT);
+      if (ns > 5e3 && ns < 5e7) {           // 合理区间 5µs–50ms，异常值丢弃
+        P.gpuMs += (ns / 1e6 - P.gpuMs) * 0.25;
+        P.gpuTimerOK = true;
+      }
+    }
+    gpuTimerExt.deleteQuery(q);
+  }
+}
+
+const P = { scale: 0.75, aurora: 1.70, wave: 1.60, speed: 1.00, yaw: 0, pitch: -0.12, gpuCap: 80, gpuMs: 0, gpuLoad: 0, frameN: 0, gpuTimerOK: false, gpuTimerBroken: false };
 
 function bind(id, key, fmt) {
   const el = $(id), out = $(id + 'Val');
@@ -271,6 +299,7 @@ function bind(id, key, fmt) {
 bind('aur', 'aurora', v => v.toFixed(2));
 bind('wav', 'wave',   v => v.toFixed(2));
 bind('spd', 'speed',  v => v.toFixed(2));
+bind('gpu', 'gpuCap', v => v.toFixed(0) + '%');
 
 const resEl = $('res'), autoEl = $('auto');
 function resLabel() {
@@ -307,7 +336,7 @@ canvas.addEventListener('pointermove', e => {
 addEventListener('pointerup', () => drag = null);
 addEventListener('pointercancel', () => drag = null);
 
-let simT = 0, last = performance.now(), fps = 60, lastUi = 0, lastFrame = 0;
+let simT = 0, last = performance.now(), fps = 60, lastUi = 0, lastFrame = 0, prevNow = performance.now();
 function render(now) {
   const dt = Math.min((now - last) / 1000, 0.1);
   last = now;
@@ -316,7 +345,8 @@ function render(now) {
   fps += (1 / Math.max(dt, 1e-4) - fps) * 0.07;
   if (now - lastUi > 500) {
     lastUi = now;
-    fpsEl.textContent = fps.toFixed(0) + ' FPS · ' + Math.round(P.scale * 100) + '% (' + canvas.width + '×' + canvas.height + ')';
+    fpsEl.textContent = fps.toFixed(0) + ' FPS · GPU≈' + Math.round(P.gpuLoad) + '% · ' + Math.round(P.scale * 100) + '% (' + canvas.width + '×' + canvas.height + ')';
+    $('gpuVal').textContent = Math.round(P.gpuLoad) + '% / ' + P.gpuCap + '%';
   }
   gl.uniform2f(U.uRes, canvas.width, canvas.height);
   gl.uniform1f(U.uT, simT);
@@ -324,6 +354,30 @@ function render(now) {
   gl.uniform1f(U.uWave, P.wave);
   gl.uniform2f(U.uLook, P.yaw, P.pitch);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+  // GPU 占用估算：定时器查询优先；否则帧间隔推断（瓶颈时准、满帧率时给 55% 余量基准）
+  P.frameN++;
+  const frameMs = Math.min(now - prevNow, 60);
+  prevNow = now;
+  let q = null;
+  if (gpuTimerExt && !P.gpuTimerBroken) {
+    try {
+      q = gpuTimerExt.createQuery();
+      gpuTimerExt.beginQuery(gpuTimerExt.TIME_ELAPSED_EXT, q);
+    } catch (e) { P.gpuTimerBroken = true; q = null; }
+  }
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  if (q) {
+    try {
+      gpuTimerExt.endQuery(gpuTimerExt.TIME_ELAPSED_EXT);
+      pendingQ.push(q);
+    } catch (e) { P.gpuTimerBroken = true; }
+    gpuPoll();
+  }
+  if (!P.gpuTimerOK) {
+    if (frameMs >= 18 || fps < 57) P.gpuMs += (frameMs - P.gpuMs) * 0.08;
+    else P.gpuMs += (9.2 - P.gpuMs) * 0.02;
+  }
+  P.gpuLoad = Math.min(100, P.gpuMs / 16.667 * 100);
 }
 function rafLoop(now) { render(now); requestAnimationFrame(rafLoop); }
 resize();
@@ -340,7 +394,7 @@ setInterval(() => {
     P.scale = Math.max(0.30, P.scale - 0.05);
     resEl.value = String(Math.round(P.scale * 100));
     resize();
-  } else if (fps > 57 && P.scale < 1.0) {
+  } else if (fps > 57 && P.scale < 1.0 && P.gpuLoad < P.gpuCap - 4) {
     P.scale = Math.min(1.0, P.scale + 0.05);
     resEl.value = String(Math.round(P.scale * 100));
     resize();
