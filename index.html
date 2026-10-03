@@ -304,10 +304,15 @@ const stubFb = (() => {
   return fb;
 })();
 function stubSync() {
+  // 保存/恢复现场：探针切换绘制目标后必须还原，否则后续帧会画进桩缓冲（黑屏）
+  const prevFb = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+  const vp = gl.getParameter(gl.VIEWPORT);
   gl.bindFramebuffer(gl.FRAMEBUFFER, stubFb);
   gl.viewport(0, 0, 1, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, stubPx);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, prevFb);
+  gl.viewport(vp[0], vp[1], vp[2], vp[3]);
 }
 let rbFloor = 0.4;
 (function calibrateRB() {          // 启动时队列空闲：四次取最小值 = 纯回读开销
@@ -380,6 +385,9 @@ function render(now) {
     fpsEl.textContent = fps.toFixed(0) + ' FPS · GPU≈' + Math.round(P.gpuLoad) + '% · ' + Math.round(P.scale * 100) + '% (' + canvas.width + '×' + canvas.height + ')';
     $('gpuVal').textContent = Math.round(P.gpuLoad) + '% / ' + P.gpuCap + '%';
   }
+  // 防御性重绑：探针/校准可能切换过绘制目标与视口，每帧显式回到画布
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
   gl.uniform2f(U.uRes, canvas.width, canvas.height);
   gl.uniform1f(U.uT, simT);
   gl.uniform1f(U.uAurora, P.aurora);
